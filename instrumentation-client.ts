@@ -71,7 +71,7 @@ if (process.env.NODE_ENV !== "production" && typeof window !== "undefined") {
 
 const dsn = process.env.NEXT_PUBLIC_SENTRY_DSN ?? "";
 const tracesSampleRate = Number(
-  process.env.NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE ?? "1.0",
+  process.env.NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE ?? "0.0",
 );
 
 Sentry.init({
@@ -81,12 +81,16 @@ Sentry.init({
   // "no DSN" warnings.
   enabled: dsn.length > 0,
   tracesSampleRate,
-  integrations: [
-    Sentry.browserTracingIntegration(),
-    Sentry.replayIntegration(),
-  ],
-  replaysSessionSampleRate: 0.1,
-  replaysOnErrorSampleRate: 1.0,
+  // Drop the browser-tracing and replay integrations. @sentry/nextjs adds
+  // browserTracingIntegration via its DEFAULT integrations, so omitting it
+  // from an explicit array isn't enough — we filter the merged defaults by
+  // name. Manual spans (`Sentry.startSpan`) still work; we just don't
+  // auto-instrument pageloads/navigations, and session replay is off entirely.
+  integrations: (defaults) =>
+    defaults.filter(
+      (integration) =>
+        integration.name !== "BrowserTracing" && integration.name !== "Replay",
+    ),
 });
 
 // Required for Next.js App Router navigation instrumentation

@@ -94,15 +94,10 @@ jobs:
           command: |
             if [ "${{ github.event_name }}" = "pull_request" ]; then
               DOMAIN="pr${{ github.event.pull_request.number }}-t3rminal01.dot"
-              PUBLISH=""
             else
               DOMAIN="t3rminal01.dot"
-              # List the production domain in the on-chain Publisher registry
-              # so it shows in the mobile app under Browse → All. PR previews
-              # stay unlisted (we don't want every preview in the directory).
-              PUBLISH="--publish"
             fi
-            bulletin-deploy --env paseo-next-v2 $PUBLISH './out' "$DOMAIN"
+            bulletin-deploy --env paseo-next-v2 './out' "$DOMAIN"
         env:
           MNEMONIC: ${{ secrets.DOTNS_MNEMONIC }}
           NODE_OPTIONS: '--max-old-space-size=8192'
