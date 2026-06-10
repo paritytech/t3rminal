@@ -235,63 +235,50 @@ export function generateReceiptSVG(data: ReceiptData): string {
 }
 
 /**
- * Versioned receipt envelope carried by the QR code. Anything that wants
- * to rebuild this exact receipt (mobile companion app, audit tool, etc.)
- * only needs to scan and run the same `buildRows` against the payload.
- *
- * Bump `v` and add a new branch in the reader when fields are added; older
- * decoders will then reject unknown versions instead of silently dropping
- * data.
+ * W3sPay product DOTNS host that handles the save-receipt deeplink. The
+ * Polkadot app routes `*.dot` deeplinks to its in-app browser, opening the
+ * W3sPay SPA which reads the receipt from the URL fragment.
  */
-export interface ReceiptQrPayload {
-  v: 1
-  type: "t3rminal-receipt"
-  saleId: string | null
-  amount: string
-  asset: string
-  /** Currency printed on the receipt (e.g. "CASH"). */
-  currency: string
-  taxRate: number
-  business: {
-    name: string
-    addressLine1?: string
-    addressLine2?: string
-    phone?: string
-  }
-  items: ReceiptItem[]
-  /** ISO 8601 of the sale timestamp (extracted from saleId ULID or wall clock). */
-  issuedAt: string
-  /** Substrate block hash (hex) that confirmed the credit, when known. */
-  blockHash?: string
-  blockNumber?: number
-  merchantAddress: string
-}
+export const SAVE_RECEIPT_DEEPLINK_HOST = "w3spay.dot"
 
-export function buildReceiptQrPayload(
+/**
+ * Build the save-receipt deeplink carried by the receipt QR:
+ *
+ *   polkadotapp://<host>/#/save-receipt?v=1&id=…&a=…&as=…&c=…&t=…&ts=…
+ *     [&bn=…][&a1=…][&a2=…][&tel=…]&i=<name>|<qty>|<unitPrice>[&i=…]
+ *     [&bh=…][&bk=…][&m=…]
+ *
+ * Route + params live in the URL FRAGMENT so the in-app browser serves the
+ * W3sPay SPA entry — a path segment would 404 there. Keys are abbreviated for
+ * QR density; each repeated `i` is `name|quantity|unitPrice`. `URLSearchParams`
+ * owns the `+`/`%XX` encoding. `id` (saleId) is required by the reader; a sale
+ * minted without one yields a QR the app rejects.
+ */
+export function buildReceiptDeeplink(
   data: ReceiptData,
   business: BusinessProfile,
   ts: Date,
-): ReceiptQrPayload {
-  return {
-    v: 1,
-    type: "t3rminal-receipt",
-    saleId: data.saleId ?? null,
-    amount: data.amount,
-    asset: data.asset,
-    currency: business.currency,
-    taxRate: business.taxRate,
-    business: {
-      name: business.name,
-      addressLine1: business.addressLine1,
-      addressLine2: business.addressLine2,
-      phone: business.phone,
-    },
-    items: data.items ?? [],
-    issuedAt: ts.toISOString(),
-    blockHash: data.blockHash,
-    blockNumber: data.blockNumber,
-    merchantAddress: data.merchantAddress,
+  host: string = SAVE_RECEIPT_DEEPLINK_HOST,
+): string {
+  const params = new URLSearchParams()
+  params.set("v", "1")
+  if (data.saleId) params.set("id", data.saleId)
+  params.set("a", data.amount)
+  params.set("as", data.asset)
+  params.set("c", business.currency)
+  params.set("t", String(business.taxRate))
+  params.set("ts", ts.toISOString())
+  if (business.name) params.set("bn", business.name)
+  if (business.addressLine1) params.set("a1", business.addressLine1)
+  if (business.addressLine2) params.set("a2", business.addressLine2)
+  if (business.phone) params.set("tel", business.phone)
+  for (const item of data.items ?? []) {
+    params.append("i", `${item.name}|${item.quantity}|${item.unitPrice}`)
   }
+  if (data.blockHash) params.set("bh", data.blockHash)
+  if (data.blockNumber != null) params.set("bk", String(data.blockNumber))
+  if (data.merchantAddress) params.set("m", data.merchantAddress)
+  return `polkadotapp://${host}/#/save-receipt?${params.toString()}`
 }
 
 export async function generateReceiptSVGWithQR(data: ReceiptData): Promise<string> {
@@ -299,10 +286,7 @@ export async function generateReceiptSVGWithQR(data: ReceiptData): Promise<strin
   const business = data.business ?? BUSINESS_PROFILE
   const rows = buildRows(data, business, ts)
 
-  // Full receipt envelope — scanning this lets a companion app rebuild the
-  // exact same printable receipt without round-tripping through the chain
-  // or the bulletin gateway.
-  const qrPayload = JSON.stringify(buildReceiptQrPayload(data, business, ts))
+  const qrPayload = buildReceiptDeeplink(data, business, ts)
 
   try {
     const qrDataUrl = await QRCode.toDataURL(qrPayload, {
@@ -320,24 +304,6 @@ export async function generateReceiptSVGWithQR(data: ReceiptData): Promise<strin
     console.error("[Receipt] QR generation failed, returning receipt without QR:", error)
     return composeSvg(rows, {})
   }
-}
-
-/**
- * Parse a scanned receipt QR back into the structured payload. Returns
- * `null` for anything that isn't a t3rminal receipt v1 envelope — caller
- * decides whether to ignore, warn, or fall back.
- */
-export function parseReceiptQr(raw: string): ReceiptQrPayload | null {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
-    return null
-  }
-  if (!parsed || typeof parsed !== "object") return null
-  const obj = parsed as Record<string, unknown>
-  if (obj.type !== "t3rminal-receipt" || obj.v !== 1) return null
-  return obj as unknown as ReceiptQrPayload
 }
 
 export function svgToDataUrl(svg: string): string {
