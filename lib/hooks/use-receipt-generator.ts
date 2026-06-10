@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { usePdfReceipt } from "./use-pdf-receipt";
 import { getTimestampFromSaleId } from "@/lib/utils/sale-id";
-import { buildReceiptQrPayload, type ReceiptItem } from "@/lib/receipts/receipt-generator";
+import { buildReceiptQrPayload, buildReceiptDeeplink, type ReceiptItem } from "@/lib/receipts/receipt-generator";
 import { BUSINESS_PROFILE, type BusinessProfile } from "@/lib/config/business";
 import { useAdminQrPayload } from "@/lib/config/admin-qr";
 
@@ -113,9 +113,9 @@ export function useReceiptGenerator() {
   };
 
   /**
-   * Build the exact same JSON envelope that gets embedded as the QR on the
+   * Build the exact same wallet deeplink that gets embedded as the QR on the
    * printed receipt. Sharing this value (rather than a `/receipt/<id>` URL)
-   * lets a scanner rebuild the full receipt offline — no chain or gateway
+   * lets the wallet rebuild the full receipt offline — no chain or gateway
    * round-trip needed. Timestamp is derived from the SaleId ULID so it
    * matches the QR baked into the rendered receipt.
    */
@@ -123,7 +123,7 @@ export function useReceiptGenerator() {
     const timestamp = data.saleId
       ? getTimestampFromSaleId(data.saleId) ?? new Date()
       : new Date();
-    return JSON.stringify(
+    return buildReceiptDeeplink(
       buildReceiptQrPayload(
         {
           amount: data.amount,

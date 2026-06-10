@@ -16,6 +16,10 @@ export interface BusinessProfile {
   /** Currency label printed on the receipt — separate from the on-chain
    *  asset symbol. Defaults to "CASH" for the test environment. */
   currency: string
+  /** ISO 4217 currency code the receipt is denominated in (e.g. "EUR").
+   *  Carried on the receipt deeplink as `currency=` while `currency` above
+   *  is the printed label (`asset=`). */
+  currencyCode: string
 }
 
 export const BUSINESS_PROFILE: BusinessProfile = {
@@ -25,4 +29,5 @@ export const BUSINESS_PROFILE: BusinessProfile = {
   phone: "030/12085416",
   taxRate: 19,
   currency: "CASH",
+  currencyCode: "EUR",
 }

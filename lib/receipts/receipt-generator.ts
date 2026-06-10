@@ -251,6 +251,8 @@ export interface ReceiptQrPayload {
   asset: string
   /** Currency printed on the receipt (e.g. "CASH"). */
   currency: string
+  /** ISO 4217 currency code the receipt is denominated in (e.g. "EUR"). */
+  currencyCode: string
   taxRate: number
   business: {
     name: string
@@ -279,6 +281,7 @@ export function buildReceiptQrPayload(
     amount: data.amount,
     asset: data.asset,
     currency: business.currency,
+    currencyCode: business.currencyCode,
     taxRate: business.taxRate,
     business: {
       name: business.name,
@@ -294,15 +297,54 @@ export function buildReceiptQrPayload(
   }
 }
 
+/** Wallet deeplink scheme for "save this receipt" — handled by the Polkadot
+ *  wallet app, same `polkadotapp://w3spay.dot/...` family as the pay flow. */
+export const SAVE_RECEIPT_DEEPLINK_BASE = "polkadotapp://w3spay.dot/save-receipt"
+
+/**
+ * Serialize a receipt envelope into the `save-receipt` wallet deeplink. The
+ * QR on the printed receipt carries this URL: scanning it opens the wallet's
+ * "save receipt" handler, which rebuilds the full receipt offline from the
+ * query params — no chain or gateway round-trip.
+ *
+ * Items are repeated `item=<name>|<quantity>|<unitPrice>` params. Values are
+ * URL-encoded by URLSearchParams (spaces → `+`, `|` → `%7C`), matching the
+ * encoding the wallet already decodes for the pay deeplink. Optional fields
+ * are omitted entirely when absent rather than emitted empty.
+ */
+export function buildReceiptDeeplink(payload: ReceiptQrPayload): string {
+  const params = new URLSearchParams()
+  params.set("version", String(payload.v))
+  if (payload.saleId) params.set("saleId", payload.saleId)
+  params.set("amount", payload.amount)
+  // The receipt's printed label is the `asset` on the deeplink (e.g. "CASH");
+  // the ISO 4217 code is `currency` (e.g. "EUR").
+  params.set("asset", payload.currency)
+  params.set("currency", payload.currencyCode)
+  params.set("taxRate", String(payload.taxRate))
+  params.set("issuedAt", payload.issuedAt)
+  params.set("businessName", payload.business.name)
+  if (payload.business.addressLine1) params.set("businessAddressLine1", payload.business.addressLine1)
+  if (payload.business.addressLine2) params.set("businessAddressLine2", payload.business.addressLine2)
+  if (payload.business.phone) params.set("businessPhone", payload.business.phone)
+  for (const item of payload.items) {
+    params.append("item", `${item.name}|${item.quantity}|${item.unitPrice}`)
+  }
+  if (payload.blockHash) params.set("blockHash", payload.blockHash)
+  if (payload.blockNumber !== undefined) params.set("blockNumber", String(payload.blockNumber))
+  if (payload.merchantAddress) params.set("merchantAddress", payload.merchantAddress)
+  return `${SAVE_RECEIPT_DEEPLINK_BASE}?${params.toString()}`
+}
+
 export async function generateReceiptSVGWithQR(data: ReceiptData): Promise<string> {
   const ts = data.timestamp ? new Date(data.timestamp) : new Date()
   const business = data.business ?? BUSINESS_PROFILE
   const rows = buildRows(data, business, ts)
 
-  // Full receipt envelope — scanning this lets a companion app rebuild the
-  // exact same printable receipt without round-tripping through the chain
-  // or the bulletin gateway.
-  const qrPayload = JSON.stringify(buildReceiptQrPayload(data, business, ts))
+  // Full receipt envelope as a wallet deeplink — scanning this opens the
+  // wallet's save-receipt handler, which rebuilds the exact same printable
+  // receipt offline without round-tripping through the chain or gateway.
+  const qrPayload = buildReceiptDeeplink(buildReceiptQrPayload(data, business, ts))
 
   try {
     const qrDataUrl = await QRCode.toDataURL(qrPayload, {
