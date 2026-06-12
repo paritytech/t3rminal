@@ -107,7 +107,13 @@ jobs:
           NODE_OPTIONS: '--max-old-space-size=8192'
 
       - name: Comment on PR
-        if: github.event.pull_request
+        # Skip for fork PRs: `pull_request` from a fork runs with a read-only
+        # GITHUB_TOKEN regardless of the job-level `pull-requests: write`
+        # permission (security default — avoids fork PRs writing to upstream).
+        # The `issues/<n>/comments` API returns 403 "Resource not accessible
+        # by integration" and the whole deploy job fails. Branch PRs from the
+        # same repo still get the preview comment.
+        if: github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/github-script@v7
         with:
           script: |
