@@ -28,7 +28,7 @@ import { detectHostEnvironment } from "@/lib/host";
 import { generateEphemeralKeypair, generatePaymentId } from "./keys";
 import { deriveTopic } from "./topic";
 import { buildPayW3sDeeplink, normalizeAmount } from "./deeplink";
-import { withSpan, captureWarning } from "@/lib/telemetry";
+import { withSpan, captureWarning, withPaymentTrace } from "@/lib/telemetry";
 import { classifyTopupError } from "./topup-error";
 
 function log(message: string): void {
@@ -226,11 +226,21 @@ export function useCoinagePayment(
                   });
                 }
                 try {
-                  await withSpan(
-                    "coinage topUp",
-                    "payment.coinage.topup",
-                    () => manager.topUp(0n, { type: "coins", keys: claimed.coins }),
-                    { "topup.attempt": String(topupAttempts) },
+                  // trace_id = payment id ⇒ this claim correlates cross-system
+                  // (payer / processor) in one Sentry trace. See e2e-correlation design.
+                  await withPaymentTrace(id, () =>
+                    withSpan(
+                      "coinage topUp",
+                      "payment.coinage.topup",
+                      () => manager.topUp(0n, { type: "coins", keys: claimed.coins }),
+                      {
+                        "topup.attempt": String(topupAttempts),
+                        "payment.id": id,
+                        "payment.topic": toHex(topic),
+                        "pay.role": "terminal",
+                        "pay.phase": "claimed",
+                      },
+                    ),
                   );
                   if (cancelled) return;
                   log("  claim ok — paid");

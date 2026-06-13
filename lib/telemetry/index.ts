@@ -7,6 +7,7 @@
 export { journeyTracker, JourneyTracker } from "./journey-tracker";
 export type { AppJourneyType } from "./journey-tracker";
 export { withSpan, breadcrumb, captureError, captureWarning, isExpectedError } from "./sentry-helpers";
+export { withPaymentTrace } from "./payment-trace";
 export {
   recordPaymentOutcome,
   recordFinalizationLatency,
