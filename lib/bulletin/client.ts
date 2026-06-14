@@ -20,6 +20,13 @@
  *  We grant that lazily via `ensureBootstrap` (lib/host/allowances.ts) —
  *  one host modal per session, memoized.
  *
+ * Permission prerequisite:
+ *  The host gates the submit slot behind the `PreimageSubmit` remote
+ *  permission, granted via `ensurePreimageSubmitPermission`
+ *  (lib/host/allowances.ts) before every submit. Distinct from the on-chain
+ *  `BulletInAllowance` above; without it the host silently drops the request
+ *  and the call hangs forever.
+ *
  * Reads go through the same host preimage path. Inside the container we call
  * `preimageManager.lookup(key)` — the host serves the bytes from its own
  * Bulletin node, so no public HTTPS gateway is involved. The lookup key is the
@@ -34,7 +41,7 @@
 
 import { calculateCID, cidToPreimageKey } from "./cid"
 import { BULLETIN_ENDPOINTS, readJsonFromGateway } from "./upload"
-import { claimDefaultAllowances } from "@/lib/host/allowances"
+import { claimDefaultAllowances, ensurePreimageSubmitPermission } from "@/lib/host/allowances"
 
 export interface BulletinUploadResult {
   cid: string
@@ -42,6 +49,26 @@ export interface BulletinUploadResult {
   gatewayUrl: string
   /** SS58 of the account the host used to submit the preimage. */
   signedBy: string
+}
+
+const PREIMAGE_SUBMIT_TIMEOUT_MS = 120_000
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(
+        () =>
+          reject(
+            new Error(
+              `${label} timed out after ${ms}ms — the host did not respond. Ensure the ` +
+                `PreimageSubmit permission was granted in the Polkadot app and retry.`,
+            ),
+          ),
+        ms,
+      ),
+    ),
+  ])
 }
 
 export async function uploadToBulletinChain(
@@ -61,6 +88,9 @@ export async function uploadToBulletinChain(
   // calls within the page lifetime short-circuit.
   await claimDefaultAllowances()
 
+  // Must precede submit: the host silently drops un-permitted submits (hangs).
+  await ensurePreimageSubmitPermission()
+
   const cid = calculateCID(data)
   const gatewayUrl = `${BULLETIN_ENDPOINTS.paseo.gateway}${cid}`
 
@@ -68,7 +98,7 @@ export async function uploadToBulletinChain(
   console.log("[Bulletin] Submitting preimage via host API, size:", data.length)
   let key: string
   try {
-    key = await preimageManager.submit(data)
+    key = await withTimeout(preimageManager.submit(data), PREIMAGE_SUBMIT_TIMEOUT_MS, "host preimage submit")
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     if (/no allowance set for account/i.test(message)) {

@@ -17,7 +17,7 @@
 
 "use client";
 
-import { hostApi } from "@novasamatech/host-api-wrapper";
+import { hostApi, requestPermission } from "@novasamatech/host-api-wrapper";
 import { enumValue } from "@novasamatech/host-api";
 
 let cached: Promise<void> | null = null;
@@ -50,4 +50,40 @@ async function doClaim(): Promise<void> {
       console.warn("[allowances] requestResourceAllocation failed:", err);
     },
   );
+}
+
+let permissionCached: Promise<void> | null = null;
+
+/**
+ * Grant the host-side `PreimageSubmit` remote permission — the slot that lets
+ * the host sign + submit `TransactionStorage.store` preimages on our behalf.
+ * Distinct from `BulletinAllowance` (the on-chain quota): without this the host
+ * silently drops the submit request and the call hangs. Memoized for the page
+ * lifetime; a failure clears the cache so a retry re-prompts.
+ */
+export function ensurePreimageSubmitPermission(): Promise<void> {
+  if (permissionCached) return permissionCached;
+  permissionCached = doRequestPreimagePermission().catch((err) => {
+    permissionCached = null;
+    throw err;
+  });
+  return permissionCached;
+}
+
+async function doRequestPreimagePermission(): Promise<void> {
+  console.info("[allowances] requesting PreimageSubmit remote permission");
+  const granted = await requestPermission({ tag: "PreimageSubmit", value: undefined }).match(
+    (ok) => ok,
+    (err) => {
+      throw new Error(
+        `Host rejected the PreimageSubmit permission request: ${err?.payload?.reason ?? "transport error"}`,
+      );
+    },
+  );
+  if (!granted) {
+    throw new Error(
+      "The host did not grant the PreimageSubmit permission. Approve the Bulletin write " +
+        "permission in the Polkadot app, then retry the report upload.",
+    );
+  }
 }
