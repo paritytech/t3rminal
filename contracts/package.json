@@ -13,7 +13,7 @@
   "author": "T3RMINAL Team",
   "license": "MIT",
   "devDependencies": {
-    "@nomicfoundation/hardhat-toolbox": "^6.1.0",
+    "@nomicfoundation/hardhat-toolbox": "^7.0.0",
     "@parity/hardhat-polkadot": "^0.3.0",
     "@parity/resolc": "^1.1.0",
     "hardhat": "^2.28.4"
