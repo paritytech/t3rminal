@@ -60,7 +60,7 @@
     "color": "^5.0.2",
     "dexie": "^4.2.1",
     "dexie-react-hooks": "^4.2.0",
-    "ethers": "^6.16.0",
+    "ethers": "^6.17.0",
     "html5-qrcode": "^2.3.8",
     "jspdf": "^4.2.1",
     "lucide-react": "^0.552.0",
