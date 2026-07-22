@@ -114,6 +114,44 @@ export type OnChainPhase = "submitting-onchain";
  *  signature step. */
 const READ_TIMEOUT_MS = 8000;
 
+// ── Mapped-account cache ─────────────────────────────────────────────────────
+// Revive.map_account is once-per-account, but we paid the probe (2 host-bridge
+// reads, up to 8s timeout each) on EVERY report. Cache the mapped fact in
+// localStorage, keyed by contract address so a chain reset / redeploy (which
+// changes the address) naturally invalidates it. If the cache goes stale some
+// other way, the Revive.call fails with `AccountUnmapped` — the submit path
+// below catches exactly that, clears the cache, maps, and retries once.
+
+function mappedCacheKey(origin: string): string {
+  return `t3rminal.revive.mapped:${getContractAddresses().bulletinIndex}:${origin}`;
+}
+
+/** localStorage can throw (private mode, disabled storage) — never let the
+ *  cache break the flow; a failed read just means "probe as before". */
+function readMappedCache(origin: string): boolean {
+  try {
+    return localStorage.getItem(mappedCacheKey(origin)) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeMappedCache(origin: string): void {
+  try {
+    localStorage.setItem(mappedCacheKey(origin), "1");
+  } catch {
+    /* non-fatal — next run probes again */
+  }
+}
+
+function clearMappedCache(origin: string): void {
+  try {
+    localStorage.removeItem(mappedCacheKey(origin));
+  } catch {
+    /* non-fatal */
+  }
+}
+
 function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
   return Promise.race([
     p,
@@ -212,20 +250,10 @@ export async function storeDailyReportViaRevive(
     return original != null;
   };
 
-  let isMapped = false;
-  try {
-    isMapped = await isAccountMapped();
-    console.log(`[BulletinIndex] account mapped on-chain: ${isMapped}`);
-  } catch (err) {
-    // Read timed out / threw — don't abort. Fall through to map_account, which
-    // is idempotent (AccountAlreadyMapped is caught) and whose inclusion oracle
-    // confirms quickly if the account was in fact already mapped.
-    console.warn("[BulletinIndex] mapping probe failed/timed out — will attempt map_account:", err);
-  }
-
   const submitOpts = { mortality: { mortal: true as const, period: 256 } };
 
-  if (!isMapped) {
+  // Runs Revive.map_account, tolerating the already-mapped race. Idempotent.
+  const mapAccount = async (): Promise<void> => {
     onPhase?.("submitting-onchain");
     console.log("[BulletinIndex] → Revive.map_account (awaiting signature on phone)…");
     try {
@@ -240,6 +268,27 @@ export async function storeDailyReportViaRevive(
       if (!/AccountAlreadyMapped/i.test(message)) throw e;
       console.log("[BulletinIndex] map_account: already mapped on-chain (race), continuing");
     }
+  };
+
+  // Skip the probe (2 host-bridge reads, up to 8s each) when a previous run on
+  // this contract already confirmed the mapping. Staleness is handled by the
+  // AccountUnmapped retry around the Revive.call submit below.
+  if (readMappedCache(origin)) {
+    console.log("[BulletinIndex] account mapped (cached) — skipping probe");
+  } else {
+    let isMapped = false;
+    try {
+      isMapped = await isAccountMapped();
+      console.log(`[BulletinIndex] account mapped on-chain: ${isMapped}`);
+    } catch (err) {
+      // Read timed out / threw — don't abort. Fall through to map_account, which
+      // is idempotent (AccountAlreadyMapped is caught) and whose inclusion oracle
+      // confirms quickly if the account was in fact already mapped.
+      console.warn("[BulletinIndex] mapping probe failed/timed out — will attempt map_account:", err);
+    }
+
+    if (!isMapped) await mapAccount();
+    writeMappedCache(origin);
   }
 
   onPhase?.("submitting-onchain");
@@ -265,19 +314,37 @@ export async function storeDailyReportViaRevive(
     }
   };
 
-  const blockHash = await watchTx(
-    reviveTx.call({
-      dest: bulletinIndex,
-      value: BigInt(0),
-      weight_limit: { ref_time: BigInt("50000000000"), proof_size: BigInt("1000000") },
-      storage_deposit_limit: BigInt("10000000000"),
-      data: Binary.fromHex(calldata as `0x${string}`) as unknown as Uint8Array,
-    }),
-    signer,
-    submitOpts,
-    inclusionOracle,
-    "Revive.call",
-  );
+  const submitReviveCall = () =>
+    watchTx(
+      reviveTx.call({
+        dest: bulletinIndex,
+        value: BigInt(0),
+        weight_limit: { ref_time: BigInt("50000000000"), proof_size: BigInt("1000000") },
+        storage_deposit_limit: BigInt("10000000000"),
+        data: Binary.fromHex(calldata as `0x${string}`) as unknown as Uint8Array,
+      }),
+      signer,
+      submitOpts,
+      inclusionOracle,
+      "Revive.call",
+    );
+
+  let blockHash: `0x${string}`;
+  try {
+    blockHash = await submitReviveCall();
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    // Stale mapped-cache (chain reset the cache key survived, or a mapping
+    // probe that raced a reset): the dispatch error surfaces as
+    // `AccountUnmapped`. Recover in place — drop the cache, map, retry ONCE.
+    // Anything else (including a stall, which is ambiguous) propagates.
+    if (!/AccountUnmapped/i.test(message)) throw e;
+    console.warn("[BulletinIndex] Revive.call rejected with AccountUnmapped — re-mapping and retrying once");
+    clearMappedCache(origin);
+    await mapAccount();
+    writeMappedCache(origin);
+    blockHash = await submitReviveCall();
+  }
 
   console.log(`[BulletinIndex] ✓ Revive.call confirmed (block ${blockHash.slice(0, 12)}…)`);
   return blockHash;
@@ -309,6 +376,8 @@ function watchTx(
     let settled = false;
     let pollLoopStopped = false;
     let broadcastedHash: `0x${string}` | undefined;
+    let signedHash: `0x${string}` | undefined;
+    let watchdogStarted = false;
     let stallTimer: ReturnType<typeof setTimeout> | undefined;
 
     const clearStall = () => { if (stallTimer) { clearTimeout(stallTimer); stallTimer = undefined; } };
@@ -331,33 +400,52 @@ function watchTx(
       resolve(hash);
     };
 
+    // Arm the stall watchdog and start the inclusion-oracle poll. Called on the
+    // FIRST of `signed` / `broadcasted` — some host bridges never deliver the
+    // `broadcasted` event even though the tx goes out, and previously that
+    // meant no watchdog and no oracle: the flow hung until the outer report
+    // timeout. Starting at `signed` costs at most one early (false) oracle
+    // poll and removes that hang mode. Idempotent.
+    const startWatchdog = () => {
+      if (watchdogStarted || settled) return;
+      watchdogStarted = true;
+      console.log(`[${label}] arming inclusion watchdog (${STALL_TIMEOUT_MS}ms)`);
+      armStall();
+      if (inclusionOracle) {
+        void (async () => {
+          await Promise.resolve();
+          while (!pollLoopStopped && !settled) {
+            try {
+              const landed = await inclusionOracle();
+              if (landed) {
+                console.log(`[${label}] inclusion oracle: landed (state read confirms tx effect)`);
+                // Prefer the broadcast hash; fall back to the signed hash so a
+                // missing `broadcasted` event can't leave the promise pending.
+                succeed((broadcastedHash ?? signedHash ?? "0x") as `0x${string}`);
+                return;
+              }
+              armStall();
+            } catch (err) {
+              console.warn(`[${label}] inclusion oracle threw:`, err);
+            }
+            await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+          }
+        })();
+      }
+    };
+
     const sub = tx.signSubmitAndWatch(signer, submitOpts).subscribe({
       next(ev: unknown) {
         const e = ev as { type?: string; found?: boolean; ok?: boolean; dispatchError?: unknown; txHash?: string; block?: { hash: string; number: number } };
-        if (e.type === "signed") console.log(`[${label}] signed (txHash=${e.txHash?.slice(0, 12)}…)`);
+        if (e.type === "signed") {
+          signedHash = e.txHash as `0x${string}` | undefined;
+          console.log(`[${label}] signed (txHash=${e.txHash?.slice(0, 12)}…)`);
+          startWatchdog();
+        }
         if (e.type === "broadcasted") {
           broadcastedHash = e.txHash as `0x${string}` | undefined;
-          console.log(`[${label}] broadcasted, arming inclusion watchdog (${STALL_TIMEOUT_MS}ms)`);
-          armStall();
-          if (inclusionOracle) {
-            void (async () => {
-              await Promise.resolve();
-              while (!pollLoopStopped && !settled) {
-                try {
-                  const landed = await inclusionOracle();
-                  if (landed) {
-                    console.log(`[${label}] inclusion oracle: landed (state read confirms tx effect)`);
-                    if (broadcastedHash) succeed(broadcastedHash);
-                    return;
-                  }
-                  armStall();
-                } catch (err) {
-                  console.warn(`[${label}] inclusion oracle threw:`, err);
-                }
-                await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-              }
-            })();
-          }
+          console.log(`[${label}] broadcasted`);
+          startWatchdog();
         }
         if (e.type === "txBestBlocksState" && e.found) {
           armStall();
@@ -371,11 +459,11 @@ function watchTx(
             return;
           }
           console.log(`[${label}] txBestBlocksState.found in block ${e.block?.hash?.slice(0, 12)}…`);
-          succeed((e.block?.hash ?? broadcastedHash ?? "0x") as `0x${string}`);
+          succeed((e.block?.hash ?? broadcastedHash ?? signedHash ?? "0x") as `0x${string}`);
         }
         if (e.type === "finalized") {
           console.log(`[${label}] finalized (block ${e.block?.hash?.slice(0, 12)}…)`);
-          if (!settled) succeed((e.block?.hash ?? broadcastedHash ?? "0x") as `0x${string}`);
+          if (!settled) succeed((e.block?.hash ?? broadcastedHash ?? signedHash ?? "0x") as `0x${string}`);
           try { sub.unsubscribe(); } catch { /* noop */ }
         }
       },

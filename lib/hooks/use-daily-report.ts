@@ -13,6 +13,7 @@ import {
   getMetadataViaRevive,
 } from "@/lib/contracts/revive-bulletin-index";
 import { useAccount } from "@/lib/web3";
+import { calculateCID } from "@/lib/bulletin/cid";
 import { loadManualKey, manualKeyFingerprint } from "@/lib/crypto/manual-key";
 import { encryptReportSymmetric } from "@/lib/crypto/symmetric-report";
 import { journeyTracker, captureError, isExpectedError } from "@/lib/telemetry";
@@ -36,6 +37,20 @@ function withReportTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
         () => reject(new Error(`${label} timed out after ${Math.round(REPORT_TIMEOUT_MS / 1000)}s — please try again.`)),
         REPORT_TIMEOUT_MS,
       ),
+    ),
+  ]);
+}
+
+/** Cap for the finalized pre-check read — a host-bridge read can hang, and a
+ *  hung ADVISORY check must not stall the pipeline (it is skipped on timeout,
+ *  matching the existing skip-on-read-failure behavior). */
+const PRECHECK_TIMEOUT_MS = 8_000;
+
+function raceTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms),
     ),
   ]);
 }
@@ -328,9 +343,19 @@ export function useDailyReport(): UseDailyReportReturn {
         // further write, which makes the on-chain submit revert and the watcher
         // hang. Detect it up front and fail fast with a clear message — covers
         // both "save X over a closed day" and "re-run Z".
-        if (onchainEnabled && isInHost() && merchantId) {
+        //
+        // Started here but awaited only AFTER generate/encrypt, so the read
+        // round-trip overlaps the local work instead of preceding it. Capped at
+        // PRECHECK_TIMEOUT_MS — on timeout/read failure the check is skipped
+        // (advisory), exactly like the previous skip-on-read-failure behavior.
+        const finalizedPreCheck: Promise<void> = (async () => {
+          if (!(onchainEnabled && isInHost() && merchantId)) return;
           try {
-            const meta = await getMetadataViaRevive(merchantId, terminalId, reportKey);
+            const meta = await raceTimeout(
+              getMetadataViaRevive(merchantId, terminalId, reportKey),
+              PRECHECK_TIMEOUT_MS,
+              "finalized pre-check",
+            );
             if (meta.exists && meta.finalized) {
               throw new Error(
                 finalize
@@ -343,7 +368,11 @@ export function useDailyReport(): UseDailyReportReturn {
             if (err instanceof Error && /already finalized/.test(err.message)) throw err;
             console.warn("[DailyReport] finalized pre-check skipped (read failed):", err);
           }
-        }
+        })();
+        // The real rejection is consumed at the `await` below; this no-op
+        // handler only prevents an "unhandled rejection" if generate/encrypt
+        // throws first and the await is never reached.
+        finalizedPreCheck.catch(() => {});
 
         // 1. Generate report from localStorage or an explicit period slice.
         const report = period
@@ -390,41 +419,67 @@ export function useDailyReport(): UseDailyReportReturn {
           console.log("[DailyReport] No manual key set — uploading plaintext");
         }
 
-        // 3. Upload to Bulletin Chain
-        setPhase("uploading");
-        const uploadResult = await uploadDailyReport(reportToUpload as DailyReport);
-        journeyTracker.milestone(journey, "ipfs-uploaded");
+        // Fail fast on a finalized slot before spending any chain time (the
+        // read has been overlapping generate/encrypt since the start).
+        await finalizedPreCheck;
 
-        // 4. Mirror CID on-chain via BulletinIndex contract.
-        // Gated by Settings → On-chain indexing (on by default). When off, the
-        // CID lives only locally. Needs a merchant+terminal identity — skip
-        // gracefully if the terminal hasn't been bound to a merchant yet.
-        let onChainIndexed = false;
-        if (onchainEnabled && isInHost() && account?.address) {
+        // 3+4. Upload to Bulletin AND mirror the CID on-chain.
+        //
+        // The CID is content-derived (blake2b of the exact upload bytes — see
+        // lib/bulletin/cid.ts), so it is known BEFORE the upload completes and
+        // the two legs are independent:
+        //
+        //  - save (finalize=false): run them in PARALLEL — wall time becomes
+        //    max(upload, on-chain) instead of the sum. Failure matrix:
+        //      upload ok  + revive ok   → fully indexed (as before)
+        //      upload ok  + revive fail → non-critical, onChainIndexed=false
+        //                                 (identical to the sequential path)
+        //      upload fail + revive ok  → job throws, local record NOT saved;
+        //                                 the slot is NOT finalized, so the
+        //                                 next successful save overwrites the
+        //                                 dangling CID (content-addressed and
+        //                                 repeatable — no data loss)
+        //      both fail                → job throws with the upload error
+        //
+        //  - finalize (Z): SEQUENTIAL, upload first. Reports embed exportDate,
+        //    so a re-run produces different bytes → a different CID. If we
+        //    locked the slot before Bulletin confirmed the content and the
+        //    upload then failed permanently, the locked CID could become
+        //    unresolvable forever. Never lock ahead of confirmed content.
+        setPhase("uploading");
+        const uploadBytes = new TextEncoder().encode(JSON.stringify(reportToUpload, null, 2));
+        const expectedCid = calculateCID(uploadBytes);
+
+        // On-chain mirror leg (step 4). Gated by Settings → On-chain indexing
+        // (on by default) and a merchant+terminal identity. Never rejects —
+        // on-chain indexing is non-critical by design and every failure is
+        // contained here (warn + Sentry), exactly like the previous
+        // sequential implementation.
+        const runReviveMirror = async (): Promise<boolean> => {
+          if (!(onchainEnabled && isInHost() && account?.address)) return false;
           try {
             if (!merchantId) {
               throw new Error("No merchantId in config — scan an admin QR to enable on-chain indexing.");
             }
             const hostAccounts = await getHostAccounts();
             const hostAccount = hostAccounts.find((ha) => ha.address === account.address);
+            if (!hostAccount) return false;
 
-            if (hostAccount) {
-              await storeDailyReportViaRevive(
-                hostAccount.address,
-                hostAccount.polkadotSigner,
-                {
-                  merchantId,
-                  terminalId,
-                  date: reportKey,
-                  cid: uploadResult.cid,
-                  entryCount: report.totalTransactions,
-                  finalize,
-                },
-                setPhase
-              );
-              onChainIndexed = true;
-              journeyTracker.milestone(journey, "on-chain-indexed");
-            }
+            await storeDailyReportViaRevive(
+              hostAccount.address,
+              hostAccount.polkadotSigner,
+              {
+                merchantId,
+                terminalId,
+                date: reportKey,
+                cid: expectedCid,
+                entryCount: report.totalTransactions,
+                finalize,
+              },
+              setPhase
+            );
+            journeyTracker.milestone(journey, "on-chain-indexed");
+            return true;
           } catch (err) {
             console.warn("[DailyReport] On-chain indexing failed (non-critical):", err);
             captureError(err, {
@@ -432,7 +487,41 @@ export function useDailyReport(): UseDailyReportReturn {
               phase: "on-chain-index",
               severity: "non-critical",
             });
+            return false;
           }
+        };
+
+        let uploadResult: Awaited<ReturnType<typeof uploadDailyReport>>;
+        let onChainIndexed = false;
+
+        if (finalize) {
+          // Z report: the upload must confirm before the slot is locked.
+          uploadResult = await uploadDailyReport(reportToUpload as DailyReport, uploadBytes);
+          journeyTracker.milestone(journey, "ipfs-uploaded");
+          onChainIndexed = await runReviveMirror();
+        } else {
+          // X report: both legs in flight at once. allSettled so neither
+          // leg's rejection can mask the other's outcome (runReviveMirror
+          // never rejects by construction, but defend against surprises).
+          const [uploadOutcome, mirrorOutcome] = await Promise.allSettled([
+            uploadDailyReport(reportToUpload as DailyReport, uploadBytes),
+            runReviveMirror(),
+          ]);
+          onChainIndexed = mirrorOutcome.status === "fulfilled" ? mirrorOutcome.value : false;
+          if (uploadOutcome.status === "rejected") throw uploadOutcome.reason;
+          uploadResult = uploadOutcome.value;
+          journeyTracker.milestone(journey, "ipfs-uploaded");
+        }
+
+        // Invariant: the uploaded CID must equal the one mirrored on-chain —
+        // guaranteed by handing the same bytes to both legs. If this ever
+        // fires, something fundamental drifted (encoder/CID codec change).
+        if (uploadResult.cid !== expectedCid) {
+          captureError(
+            new Error(`CID mismatch: uploaded ${uploadResult.cid} vs indexed ${expectedCid}`),
+            { component: "daily-report", phase: "cid-invariant" },
+          );
+          console.error(`[DailyReport] CID mismatch — uploaded ${uploadResult.cid}, indexed ${expectedCid}`);
         }
 
         // 5. Store CID locally in IndexedDB

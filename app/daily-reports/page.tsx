@@ -33,6 +33,7 @@ import { useAssetSymbol } from "@/lib/utils/asset-metadata";
 import type { DailyReportRecord } from "@/lib/storage/types";
 import { isHostPrinterAvailable, printHostDocument, type PrintDocumentKind } from "@/lib/host/printing";
 import { buildReportPrintDocument } from "@/lib/receipts/thermal-print";
+import { warmUpReportPath } from "@/lib/host/warmup";
 
 export default function DailyReportsPage() {
   const symbol = useAssetSymbol();
@@ -54,6 +55,15 @@ export default function DailyReportsPage() {
   // Match `useSalesHistory` — admin-configured payout address wins so reports
   // use the sales saved by the terminal under that identity.
   const merchantIdentity = adminPayload?.receivingAddress ?? account?.address;
+
+  // Pre-warm the slow host paths (allowance claims, preimage permission, cold
+  // Asset Hub connection) while the merchant is still browsing — so the first
+  // save/finalize of the session doesn't pay them inline. Fire-and-forget and
+  // idempotent; the report pipeline keeps its own inline awaits as the safety
+  // net, so a failed warmup can't break anything.
+  useEffect(() => {
+    warmUpReportPath();
+  }, []);
 
   // Open report (from a past day) pending finalize confirmation.
   const [confirmFinalizeEntry, setConfirmFinalizeEntry] = useState<DailyReportRecord | null>(null);
