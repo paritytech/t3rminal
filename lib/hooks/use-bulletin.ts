@@ -61,7 +61,7 @@ export interface UseBulletinReturn {
   isUploading: boolean;
   isReading: boolean;
   error: string | null;
-  uploadDailyReport: (report: DailyReport) => Promise<{
+  uploadDailyReport: (report: DailyReport, precomputedBytes?: Uint8Array) => Promise<{
     cid: string;
     cidHash: string;
     gatewayUrl: string;
@@ -83,12 +83,16 @@ export function useBulletin(): UseBulletinReturn {
   const [error, setError] = useState<string | null>(null);
 
   const uploadDailyReport = useCallback(
-    async (report: DailyReport) => {
+    async (report: DailyReport, precomputedBytes?: Uint8Array) => {
       setIsUploading(true);
       setError(null);
 
       try {
-        const jsonBytes = new TextEncoder().encode(JSON.stringify(report, null, 2));
+        // When the caller pre-encodes the payload (to derive the CID before the
+        // upload completes — see use-daily-report's parallel save path), reuse
+        // those exact bytes so the uploaded CID cannot diverge from the one
+        // already mirrored on-chain.
+        const jsonBytes = precomputedBytes ?? new TextEncoder().encode(JSON.stringify(report, null, 2));
 
         console.log(`[Bulletin] Uploading daily report for ${report.selectedDate}`);
 
