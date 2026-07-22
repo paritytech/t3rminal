@@ -28,21 +28,21 @@ const PRODUCT_URL = 'http://localhost:5199';
 const bobFixture = createTestHostFixture({
   productUrl: PRODUCT_URL,
   accounts: ['bob'],
-  chain: PASEO_ASSET_HUB,
+  networks: [PASEO_ASSET_HUB],
 });
 
 /** Charlie fixture — customer account (pays via /pay page) */
 const charlieFixture = createTestHostFixture({
   productUrl: PRODUCT_URL,
   accounts: ['charlie'],
-  chain: PASEO_ASSET_HUB,
+  networks: [PASEO_ASSET_HUB],
 });
 
 /** Multi-account fixture — Bob (merchant, default) + Charlie (customer, switchable) */
 const bobCharlieFixture = createTestHostFixture({
   productUrl: PRODUCT_URL,
   accounts: ['bob', 'charlie'],
-  chain: PASEO_ASSET_HUB,
+  networks: [PASEO_ASSET_HUB],
 });
 
 /** Merchant test — Bob */
