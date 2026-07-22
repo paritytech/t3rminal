@@ -74,10 +74,10 @@ test.describe('Terminal — calculator and QR generation', () => {
       frame.locator('[data-testid="waiting-text"]'),
     ).toBeVisible({ timeout: 15_000 });
 
-    // Amount should be displayed
+    // Amount should be displayed — symbol is PUSD_SYMBOL ("CASH Token"), see lib/utils/asset-ids.ts
     await expect(
       frame.locator('[data-testid="qr-amount"]'),
-    ).toHaveText('5 CASH');
+    ).toHaveText('5 CASH Token');
 
     // QR code container should be visible
     await expect(

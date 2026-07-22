@@ -20,8 +20,9 @@ test.describe('Payment flow — merchant to customer', () => {
 
     const qrContainer = frame.locator('[data-testid="qr-code"] svg');
     await expect(qrContainer).toBeVisible({ timeout: 10_000 });
+    // Symbol comes from useAssetSymbol() → PUSD_SYMBOL ("CASH Token"), see lib/utils/asset-ids.ts
     await expect(
       frame.locator('[data-testid="qr-amount"]'),
-    ).toHaveText('1 CASH');
+    ).toHaveText('1 CASH Token');
   });
 });
