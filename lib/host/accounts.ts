@@ -22,7 +22,7 @@ import { AccountId } from "polkadot-api"
 import type { PolkadotSigner } from "polkadot-api"
 import type { Account } from "@/lib/web3/types/web3"
 import { WalletProviderType } from "@/lib/web3/types/web3"
-import type { ProductAccount } from "@novasamatech/host-api-wrapper"
+import type { ProductAccount } from "@parity/product-sdk/host"
 import { getAccountsProvider } from "./connection"
 
 export interface HostAccount extends Account {
@@ -61,11 +61,8 @@ async function tryProductAccount(): Promise<HostAccount[] | null> {
   const identifier = getProductIdentifier()
   if (!identifier) return null
 
-  const provider = getAccountsProvider() as any
-  if (typeof provider.getProductAccount !== "function") {
-    console.log("[Host Accounts] getProductAccount not available on this SDK")
-    return null
-  }
+  const provider = await getAccountsProvider()
+  if (!provider) return null
 
   try {
     console.log(`[Host Accounts] Trying getProductAccount("${identifier}", 0)...`)
@@ -76,14 +73,9 @@ async function tryProductAccount(): Promise<HostAccount[] | null> {
     )
 
     return result.match(
-      (account: { publicKey: Uint8Array }) => {
+      (account: ProductAccount) => {
         const address = accountIdCodec.dec(account.publicKey)
         console.log(`[Host Accounts] Product account: ${address} (identifier=${identifier})`)
-        const productAccount: ProductAccount = {
-          dotNsIdentifier: identifier,
-          derivationIndex: 0,
-          publicKey: account.publicKey,
-        }
         // `createTransaction` slot — host receives full extension bytes (extra +
         // additionalSigned) from PAPI's tx-utils, forwards to the phone wallet.
         // Phone reconstructs the extrinsic from its own runtime metadata for
@@ -94,7 +86,7 @@ async function tryProductAccount(): Promise<HostAccount[] | null> {
           name: `T3rminal merchant`,
           address,
           provider: WalletProviderType.HostAPI,
-          polkadotSigner: provider.getProductAccountSigner(productAccount, "createTransaction"),
+          polkadotSigner: provider.getProductAccountSigner(account),
           publicKey: account.publicKey,
         }] satisfies HostAccount[]
       },
@@ -113,14 +105,8 @@ async function tryProductAccount(): Promise<HostAccount[] | null> {
  * Try the 0.7.x path: accountsProvider.getLegacyAccounts()
  */
 async function tryLegacyAccounts(): Promise<HostAccount[] | null> {
-  // Cast to any — getLegacyAccounts only exists in product-sdk >=0.7.x.
-  // Runtime check below handles the case when running against 0.6.x.
-  const provider = getAccountsProvider() as any
-
-  if (typeof provider.getLegacyAccounts !== "function") {
-    console.log("[Host Accounts] getLegacyAccounts not available (SDK <0.7.x)")
-    return null
-  }
+  const provider = await getAccountsProvider()
+  if (!provider) return null
 
   try {
     console.log("[Host Accounts] Trying getLegacyAccounts (0.7.x)...")
@@ -131,7 +117,7 @@ async function tryLegacyAccounts(): Promise<HostAccount[] | null> {
     )
 
     return result.match(
-      (accounts: Array<{ publicKey: Uint8Array; name: string | undefined }>) => {
+      (accounts) => {
         if (accounts.length === 0) {
           console.log("[Host Accounts] getLegacyAccounts returned empty")
           return [] as HostAccount[]
@@ -144,11 +130,7 @@ async function tryLegacyAccounts(): Promise<HostAccount[] | null> {
             name: acc.name || "Host Account",
             address,
             provider: WalletProviderType.HostAPI,
-            polkadotSigner: provider.getLegacyAccountSigner({
-              dotNsIdentifier: "",
-              derivationIndex: 0,
-              publicKey: acc.publicKey,
-            }),
+            polkadotSigner: provider.getLegacyAccountSigner({ publicKey: acc.publicKey }),
             publicKey: acc.publicKey,
           }
         })
@@ -175,13 +157,14 @@ export async function getHostAccounts(): Promise<HostAccount[]> {
   return (await tryLegacyAccounts()) ?? []
 }
 
-export function subscribeHostAccounts(
+export async function subscribeHostAccounts(
   onAccountsChanged: (accounts: HostAccount[]) => void
-): () => void {
-  const provider = getAccountsProvider()
+): Promise<() => void> {
+  const provider = await getAccountsProvider()
+  if (!provider) return () => {}
 
   const sub = provider.subscribeAccountConnectionStatus(async (status) => {
-    if (status === "connected") {
+    if (status === "Connected") {
       const accounts = await getHostAccounts()
       onAccountsChanged(accounts)
     } else {

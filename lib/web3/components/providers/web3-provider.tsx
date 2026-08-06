@@ -48,7 +48,7 @@ function HostAutoConnect() {
       })
       setStatus(WalletProviderType.HostAPI, WalletProviderStatus.Connected)
 
-      unsubscribe = subscribeHostAccounts((updated) => {
+      unsubscribe = await subscribeHostAccounts((updated) => {
         if (updated.length > 0) {
           const acc = updated[0]
           setAccount({
