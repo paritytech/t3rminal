@@ -2,19 +2,23 @@
  * X25519 Encryption Keypair Management
  *
  * When running inside a host (Polkadot Desktop / dot.li), the keypair is
- * derived deterministically from the user's wallet account via
- * `accountsProvider.getProductAccountAlias(identifier, 0)`. The alias is a
- * Bandersnatch VRF preoutput computed on the phone using the user's actual
- * wallet bandersnatch entropy + a deterministic context derived from the
- * productId — fully cross-device portable (same wallet imported on any
- * device → same alias → same encryption keypair).
+ * derived deterministically from the user's wallet account via the host's
+ * Ring VRF contextual alias: `accountsProvider.getProductAccountAlias(context,
+ * location)`. The host derives the alias for the user's member key in the
+ * people-lite ring on the Individuality chain, bound to a product-scoped
+ * context (productId + suffix). The alias is deterministic in (wallet member
+ * key, context, ring), so the same wallet on any device gives the same alias
+ * and therefore the same encryption keypair (cross-device portable).
  *
- * We intentionally do NOT use `deriveEntropy` here even though it's wrapped
- * in similar plumbing: the desktop host's `secrets.entropy` is a per-SSO-
- * pairing random value, not derived from the user's wallet, so two devices
- * paired with the same wallet get different `deriveEntropy` outputs. Aliases
- * go through the phone's wallet keypair instead, which IS shared across
- * devices (same imported mnemonic).
+ * We intentionally do NOT use `deriveEntropy` here: the desktop host's
+ * `secrets.entropy` is a per-SSO-pairing random value, not derived from the
+ * user's wallet, so two devices paired with the same wallet get different
+ * `deriveEntropy` outputs. The contextual alias goes through the phone's
+ * wallet ring member key instead, which IS shared across devices (same
+ * imported mnemonic).
+ *
+ * See `buildAliasRequest` below for the (context, location) construction and an
+ * important decryption-compatibility caveat.
  *
  * Standalone (dev) mode falls back to a random keypair in memory.
  */
@@ -24,6 +28,8 @@
 import { nacl } from "@/lib/crypto/primitives"
 import { hostLocalStorage } from "@novasamatech/host-api-wrapper"
 import { getAccountsProvider } from "@/lib/host/connection"
+import type { ProductProofContext, RingLocation } from "@parity/product-sdk/host"
+import { PASEO_INDIVIDUALITY_GENESIS } from "@/lib/host/provider"
 
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("")
@@ -71,65 +77,112 @@ export function generateKeypair(): EncryptionKeypair {
 // ── Deterministic derivation from host account ──────────────────
 
 /**
- * Derive a deterministic X25519 keypair from the user's wallet via
- * `getProductAccountAlias`. The phone computes the alias as
- * `BandersnatchVrf::alias_in_context(walletEntropy, blake2b256("/product/{productId}/0"))`
- * — a deterministic VRF preoutput. Same wallet (mnemonic) + same productId
- * → same alias on every device.
+ * Ring VRF location + context for the wallet-bound contextual alias.
  *
- * Returns null when not in host, no product identifier is available, or the
- * alias call fails (e.g., phone not connected, user rejected permission).
+ * The new host API (`@parity/product-sdk/host` >= 0.14) derives the alias as a
+ * Ring VRF over the user's member key in a ring, addressed by a
+ * {@link RingLocation} (`{ chainId, junctions }`) and bound to a
+ * {@link ProductProofContext} (`{ productId, suffix }`). We follow the
+ * canonical people-lite ring construction used by the reference consumers (the
+ * TruAPI playground example and `@parity/product-sdk-signer`):
+ *
+ *   context  = { productId: window.location.host, suffix: { tag: "Left", value: 0 } }
+ *   location = { chainId: Individuality genesis,
+ *                junctions: [ PalletInstance(67),
+ *                             CollectionId("pop:polkadot.network/people-lite") ] }
+ *
+ * WARNING - SEMANTIC-EQUIVALENCE / DECRYPTION-COMPAT ASSUMPTION, NEEDS
+ * SDK-TEAM (Nidish) VERIFICATION: the previous code called the old two-arg
+ * primitive `getProductAccountAlias(identifier, 0)` (product-sdk 0.7.x), whose
+ * byte derivation is not reproducible from the sources in this repo. The alias
+ * bytes produced by THIS (context, location) are only guaranteed to match old
+ * data if the old derivation used the same ring and the same product/suffix
+ * mapping (suffix Left(0) for index 0). If it did not, data encrypted under the
+ * old key will NOT decrypt. Verify before relying on cross-device decryption of
+ * any pre-migration data.
+ */
+const PEOPLE_LITE_PALLET_INSTANCE = 67
+// hex("pop:polkadot.network/people-lite") - the proof-of-personhood ring collection.
+const PEOPLE_LITE_COLLECTION_ID =
+  "0x706f703a706f6c6b61646f742e6e6574776f726b2f70656f706c652d6c697465" as `0x${string}`
+// Product-account derivation index. Host 0.15 types the context suffix as a
+// tagged DerivationIndex selector; Left(0) is the plain index-0 form (old index 0).
+const ALIAS_CONTEXT_SUFFIX: ProductProofContext["suffix"] = { tag: "Left", value: 0 }
+
+function buildAliasRequest(identifier: string): {
+  context: ProductProofContext
+  location: RingLocation
+} {
+  return {
+    context: { productId: identifier, suffix: ALIAS_CONTEXT_SUFFIX },
+    location: {
+      chainId: PASEO_INDIVIDUALITY_GENESIS,
+      junctions: [
+        { tag: "PalletInstance", value: PEOPLE_LITE_PALLET_INSTANCE },
+        { tag: "CollectionId", value: PEOPLE_LITE_COLLECTION_ID },
+      ],
+    },
+  }
+}
+
+/** Extract a human-readable reason from a host alias-call error envelope. */
+function aliasErrorReason(err: unknown): string {
+  const e = err as { payload?: { reason?: string }; value?: { reason?: string }; message?: string }
+  return e?.payload?.reason ?? e?.value?.reason ?? e?.message ?? String(err)
+}
+
+/**
+ * Derive a deterministic X25519 keypair from the user's wallet via the host's
+ * Ring VRF contextual alias (`getProductAccountAlias(context, location)`, see
+ * {@link buildAliasRequest}). The alias is deterministic in (wallet member key,
+ * context, ring), so the same wallet (mnemonic) yields the same keypair on any
+ * device.
+ *
+ * Returns null ONLY in standalone (non-host) mode, the legitimate fallback to a
+ * random/cached keypair. When running inside a host we MUST be able to derive
+ * the wallet-bound key: any failure (provider unavailable, no product
+ * identifier, host error, unexpected alias shape) THROWS rather than silently
+ * degrading to a different key that cannot decrypt cross-device data.
  */
 async function deriveFromAccountAlias(): Promise<EncryptionKeypair | null> {
   const { isInHost } = await import("@/lib/host/detect")
-  if (!isInHost()) return null
+  if (!isInHost()) return null // standalone dev: fall back to random/cached
 
   const identifier = getProductIdentifier()
-  if (!identifier) return null
-
-  try {
-    type AliasResult = {
-      match<T>(ok: (v: { alias: Uint8Array }) => T, err: (e: unknown) => T): T
-    }
-    const provider = getAccountsProvider() as unknown as {
-      getProductAccountAlias?: (id: string, idx?: number) => PromiseLike<AliasResult>
-    }
-
-    if (typeof provider.getProductAccountAlias !== "function") {
-      console.error("[Crypto] ✗ getProductAccountAlias not available on this product-sdk")
-      return null
-    }
-
-    const result = await provider.getProductAccountAlias(identifier, 0)
-    return result.match<EncryptionKeypair | null>(
-      (value) => {
-        const alias = value.alias
-        if (!(alias instanceof Uint8Array) || alias.length !== 32) {
-          console.error(`[Crypto] ✗ alias has unexpected shape: ${alias?.constructor?.name} len=${(alias as Uint8Array)?.length}`)
-          return null
-        }
-        const kp = nacl.box.keyPair.fromSecretKey(alias)
-        console.log(
-          `[Crypto] ✓ Derived deterministic keypair from wallet alias: 0x${bytesToHex(kp.publicKey)}`
-        )
-        return { publicKey: kp.publicKey, secretKey: kp.secretKey }
-      },
-      (err: unknown) => {
-        const e = err as { payload?: { reason?: string }; message?: string }
-        const reason = e?.payload?.reason ?? e?.message ?? String(err)
-        console.error(
-          `[Crypto] ✗ getProductAccountAlias returned error — cross-device decryption WILL FAIL: ${reason}`
-        )
-        return null
-      }
+  if (!identifier) {
+    throw new Error(
+      "[Crypto] cannot derive account alias in host: no product identifier (window.location.host)"
     )
-  } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : String(e)
-    console.error(
-      `[Crypto] ✗ getProductAccountAlias threw — cross-device decryption WILL FAIL: ${message}`
-    )
-    return null
   }
+
+  const provider = await getAccountsProvider()
+  if (!provider) {
+    throw new Error("[Crypto] cannot derive account alias: accounts provider unavailable in host")
+  }
+
+  const { context, location } = buildAliasRequest(identifier)
+  const alias = await provider.getProductAccountAlias(context, location).match(
+    (contextualAlias) => contextualAlias.alias,
+    (err) => {
+      throw new Error(
+        `[Crypto] getProductAccountAlias failed - cross-device decryption WILL FAIL: ${aliasErrorReason(err)}`
+      )
+    }
+  )
+
+  if (alias.length !== 32) {
+    // nacl.box (X25519) requires a 32-byte secret key. A different length means
+    // the ring/alias shape is not what this seed derivation assumes.
+    throw new Error(
+      `[Crypto] account alias has unexpected length ${alias.length} (expected 32-byte X25519 seed)`
+    )
+  }
+
+  const kp = nacl.box.keyPair.fromSecretKey(alias)
+  console.log(
+    `[Crypto] Derived deterministic keypair from wallet alias: 0x${bytesToHex(kp.publicKey)}`
+  )
+  return { publicKey: kp.publicKey, secretKey: kp.secretKey }
 }
 
 // ── Storage helpers (cache / standalone fallback) ───────────────
@@ -340,36 +393,32 @@ export async function inspectKeypair(): Promise<KeypairDiagnostics> {
   let seedHash: string | null = null
 
   if (inHost && identifier) {
+    // Diagnostic only: capture failures into `deriveEntropyError` (this helper
+    // reports state without mutating it), unlike deriveFromAccountAlias which
+    // throws on the live crypto path.
     try {
-      type AliasResult = {
-        match<T>(ok: (v: { alias: Uint8Array }) => T, err: (e: unknown) => T): T
-      }
-      const provider = getAccountsProvider() as unknown as {
-        getProductAccountAlias?: (id: string, idx?: number) => PromiseLike<AliasResult>
-      }
-
-      if (typeof provider.getProductAccountAlias === "function") {
-        const aliasResult = await provider.getProductAccountAlias(identifier, 0)
-        aliasResult.match<void>(
-          (value) => {
-            const alias = value.alias
-            if (alias instanceof Uint8Array && alias.length === 32) {
+      const provider = await getAccountsProvider()
+      if (!provider) {
+        deriveEntropyError = "accounts provider unavailable in host"
+      } else {
+        const { context, location } = buildAliasRequest(identifier)
+        await provider.getProductAccountAlias(context, location).match(
+          (contextualAlias) => {
+            const alias = contextualAlias.alias
+            if (alias.length === 32) {
               // Hash the alias so we can compare across devices without leaking it.
               seedHash = `0x${bytesToHex(blake2b(alias, { dkLen: 32 }))}`
               const kp = nacl.box.keyPair.fromSecretKey(alias)
               derivedPubHex = `0x${bytesToHex(kp.publicKey)}`
               deriveEntropyAvailable = true
             } else {
-              deriveEntropyError = `alias has unexpected shape (len=${(alias as Uint8Array)?.length})`
+              deriveEntropyError = `alias has unexpected length ${alias.length}`
             }
           },
           (err: unknown) => {
-            const e = err as { payload?: { reason?: string }; message?: string }
-            deriveEntropyError = e?.payload?.reason ?? e?.message ?? String(err)
+            deriveEntropyError = aliasErrorReason(err)
           }
         )
-      } else {
-        deriveEntropyError = "getProductAccountAlias not exposed by product-sdk"
       }
     } catch (e: unknown) {
       deriveEntropyError = e instanceof Error ? e.message : String(e)
