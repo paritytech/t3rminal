@@ -33,7 +33,7 @@
     "@noble/hashes": "^2.0.1",
     "@novasamatech/host-api": "0.8.11",
     "@novasamatech/host-api-wrapper": "0.8.11",
-    "@parity/product-sdk": "^0.19.1",
+    "@parity/product-sdk": "^0.20.1",
     "@parity/product-sdk-descriptors": "^0.8.0",
     "@polkadot-api/descriptors": "file:.papi/descriptors",
     "@polkadot-api/substrate-bindings": "^0.20.1",

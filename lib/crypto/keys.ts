@@ -86,7 +86,7 @@ export function generateKeypair(): EncryptionKeypair {
  * canonical people-lite ring construction used by the reference consumers (the
  * TruAPI playground example and `@parity/product-sdk-signer`):
  *
- *   context  = { productId: window.location.host, suffix: "0x00" }
+ *   context  = { productId: window.location.host, suffix: { tag: "Left", value: 0 } }
  *   location = { chainId: Individuality genesis,
  *                junctions: [ PalletInstance(67),
  *                             CollectionId("pop:polkadot.network/people-lite") ] }
@@ -97,7 +97,7 @@ export function generateKeypair(): EncryptionKeypair {
  * byte derivation is not reproducible from the sources in this repo. The alias
  * bytes produced by THIS (context, location) are only guaranteed to match old
  * data if the old derivation used the same ring and the same product/suffix
- * mapping (suffix "0x00" for index 0). If it did not, data encrypted under the
+ * mapping (suffix Left(0) for index 0). If it did not, data encrypted under the
  * old key will NOT decrypt. Verify before relying on cross-device decryption of
  * any pre-migration data.
  */
@@ -105,8 +105,9 @@ const PEOPLE_LITE_PALLET_INSTANCE = 67
 // hex("pop:polkadot.network/people-lite") - the proof-of-personhood ring collection.
 const PEOPLE_LITE_COLLECTION_ID =
   "0x706f703a706f6c6b61646f742e6e6574776f726b2f70656f706c652d6c697465" as `0x${string}`
-// Product-scoped context suffix. "0x00" mirrors the old derivation index 0.
-const ALIAS_CONTEXT_SUFFIX = "0x00" as `0x${string}`
+// Product-account derivation index. Host 0.15 types the context suffix as a
+// tagged DerivationIndex selector; Left(0) is the plain index-0 form (old index 0).
+const ALIAS_CONTEXT_SUFFIX: ProductProofContext["suffix"] = { tag: "Left", value: 0 }
 
 function buildAliasRequest(identifier: string): {
   context: ProductProofContext
