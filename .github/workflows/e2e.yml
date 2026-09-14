@@ -15,6 +15,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run papi:generate
+      - run: npx tsc --noEmit
+      - run: npm test
+      - run: npm run lint
+
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -30,9 +44,7 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: |
-          rm -f package-lock.json
-          npm install --no-audit --no-fund
+        run: npm ci
 
       - name: Generate PAPI descriptors
         run: npm run papi:generate

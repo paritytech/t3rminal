@@ -2,16 +2,12 @@ import { merchantTest as test, expect } from './fixtures';
 import { waitForAppReady, selectMerchantMode } from './helpers';
 
 test.describe('Home page loads via Host API', () => {
-  test('shows T3RMINAL heading after host connection', async ({ testHost }) => {
+  test('opens the empty merchant catalog after host connection', async ({ testHost }) => {
     const frame = await waitForAppReady(testHost);
 
-    await expect(
-      frame.locator('[data-testid="app-heading"]'),
-    ).toBeVisible();
-
-    await expect(
-      frame.locator('[data-testid="app-heading"]'),
-    ).toHaveText('T3RMINAL');
+    await expect(frame.getByRole('heading', { name: 'No items yet' })).toBeVisible();
+    await expect(frame.getByRole('link', { name: 'Go to Admin Configuration' }))
+      .toHaveAttribute('href', '/settings/admin-config/');
   });
 
   test('auto-redirects to the merchant home with bottom nav', async ({ testHost }) => {

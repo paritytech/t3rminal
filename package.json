@@ -81,14 +81,16 @@
     "zxing-wasm": "^3.1.0"
   },
   "devDependencies": {
-    "@parity/host-api-test-sdk": "^0.11.0",
+    "@parity/host-api-test-sdk": "0.12.1",
     "@playwright/test": "^1.59.1",
+    "@testing-library/react": "^16.3.0",
     "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "baseline-browser-mapping": "^2.10.0",
     "eslint": "^9.39.5",
     "eslint-config-next": "^16.2.11",
+    "jsdom": "^26.1.0",
     "tsx": "^4.19.2",
     "typescript": "^5",
     "vitest": "^4.1.8"

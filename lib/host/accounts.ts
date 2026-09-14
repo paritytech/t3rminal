@@ -158,19 +158,53 @@ export async function getHostAccounts(): Promise<HostAccount[]> {
 }
 
 export async function subscribeHostAccounts(
-  onAccountsChanged: (accounts: HostAccount[]) => void
+  onAccountsChanged: (accounts: HostAccount[]) => void,
+  onError: (error: unknown) => void = () => {},
 ): Promise<() => void> {
   const provider = await getAccountsProvider()
-  if (!provider) return () => {}
+  if (!provider) {
+    onAccountsChanged([])
+    return () => {}
+  }
 
-  const sub = provider.subscribeAccountConnectionStatus(async (status) => {
-    if (status === "Connected") {
+  let active = true
+  let generation = 0
+  const refresh = async () => {
+    const request = ++generation
+    try {
       const accounts = await getHostAccounts()
-      onAccountsChanged(accounts)
-    } else {
-      onAccountsChanged([])
+      if (active && request === generation) onAccountsChanged(accounts)
+    } catch (error) {
+      if (active && request === generation) {
+        onAccountsChanged([])
+        onError(error)
+      }
     }
-  })
+  }
+  const clear = () => {
+    ++generation
+    if (active) onAccountsChanged([])
+  }
 
-  return () => sub.unsubscribe()
+  // Start the initial read before registering: a synchronous disconnected
+  // status must invalidate it just like any later status notification.
+  void refresh()
+  try {
+    const sub = provider.subscribeAccountConnectionStatus((status) => {
+      if (!active) return
+      if (status === "Connected") void refresh()
+      else clear()
+    })
+    const removeInterrupt = sub.onInterrupt(() => clear())
+    return () => {
+      active = false
+      ++generation
+      removeInterrupt()
+      sub.unsubscribe()
+    }
+  } catch (error) {
+    active = false
+    ++generation
+    throw error
+  }
 }

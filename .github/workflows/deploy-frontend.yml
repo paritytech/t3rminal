@@ -40,17 +40,8 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        # npm bug #4828: a lockfile generated on macOS pins macOS-only
-        # variants of optional native modules (e.g.
-        # `@rollup/rollup-darwin-arm64`) and never lists the Linux
-        # equivalents. Both `npm ci` and `npm install` then honor the
-        # lockfile and skip `@rollup/rollup-linux-x64-gnu`, which `papi`
-        # imports via rollup. The fix npm itself recommends in the error
-        # message: delete the lockfile and let `npm install` resolve fresh
-        # for this platform.
-        run: |
-          rm -f package-lock.json
-          npm install --no-audit --no-fund
+        # The committed lockfile includes Linux and macOS optional native packages.
+        run: npm ci
 
       - name: Generate PAPI descriptors
         run: npm run papi:generate

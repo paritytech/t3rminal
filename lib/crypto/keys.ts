@@ -91,15 +91,12 @@ export function generateKeypair(): EncryptionKeypair {
  *                junctions: [ PalletInstance(67),
  *                             CollectionId("pop:polkadot.network/people-lite") ] }
  *
- * WARNING - SEMANTIC-EQUIVALENCE / DECRYPTION-COMPAT ASSUMPTION, NEEDS
- * SDK-TEAM (Nidish) VERIFICATION: the previous code called the old two-arg
- * primitive `getProductAccountAlias(identifier, 0)` (product-sdk 0.7.x), whose
- * byte derivation is not reproducible from the sources in this repo. The alias
- * bytes produced by THIS (context, location) are only guaranteed to match old
- * data if the old derivation used the same ring and the same product/suffix
- * mapping (suffix Left(0) for index 0). If it did not, data encrypted under the
- * old key will NOT decrypt. Verify before relying on cross-device decryption of
- * any pre-migration data.
+ * The legacy and current host protocols encode different proof contexts:
+ * legacy UTF8('/product/{id}/0') versus current UTF8('product/{id}/') plus
+ * a 32-byte expanded DerivationIndex. Do not assume alias/key equivalence.
+ * Old ciphertext needs an explicit compatibility/migration strategy before
+ * this path is used across devices. Derived keys never replace a different
+ * cached keypair; a mismatch fails without writing the cache.
  */
 const PEOPLE_LITE_PALLET_INSTANCE = 67
 // hex("pop:polkadot.network/people-lite") - the proof-of-personhood ring collection.
@@ -225,23 +222,67 @@ async function saveToCache(kp: EncryptionKeypair): Promise<void> {
   })
 }
 
+// Serialize local derived-key writes so two concurrent lookups cannot both
+// observe an empty cache and replace each other's key. This is a per-tab
+// guard, not a distributed migration or a cross-device storage transaction.
+let pendingDerivedSave: Promise<void> = Promise.resolve()
+
+async function saveDerivedToCache(kp: EncryptionKeypair): Promise<void> {
+  const save = pendingDerivedSave.then(async () => {
+    const storage = hostLocalStorage
+    // readJSON throws for an absent key in this host wrapper. Only an absent
+    // raw value permits initialization; stored invalid JSON and read errors
+    // must never be interpreted as permission to overwrite existing data.
+    const bytes = await storage.readBytes(STORAGE_KEY)
+    if (bytes != null) {
+      let existing: unknown
+      try {
+        existing = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes))
+      } catch {
+        throw new Error("[Crypto] cached keypair is invalid; refusing to overwrite it")
+      }
+      if (typeof existing !== "object" || existing === null || Array.isArray(existing)) {
+        throw new Error("[Crypto] cached keypair is invalid; refusing to overwrite it")
+      }
+      const record = existing as { publicKey?: unknown; secretKey?: unknown }
+      const validHex = (value: unknown): value is string =>
+        typeof value === "string" && /^(?:0x)?[0-9a-fA-F]{64}$/.test(value)
+      if (!validHex(record.publicKey) || !validHex(record.secretKey)) {
+        throw new Error("[Crypto] cached keypair is invalid; refusing to overwrite it")
+      }
+      const equal = (hex: string, bytes: Uint8Array) =>
+        hexToBytes(hex).every((value, index) => value === bytes[index])
+      if (!equal(record.publicKey, kp.publicKey) || !equal(record.secretKey, kp.secretKey)) {
+        throw new Error("[Crypto] derived key differs from cached key; explicit key migration is required")
+      }
+      return
+    }
+    await storage.writeJSON(STORAGE_KEY, {
+      publicKey: bytesToHex(kp.publicKey),
+      secretKey: bytesToHex(kp.secretKey),
+    })
+  })
+  pendingDerivedSave = save.catch(() => {})
+  return save
+}
+
 /**
  * Load this account's keypair.
  *
  * In host mode: derives deterministically from the user's wallet via
- * `getProductAccountAlias` (cross-device portable). Falls back to cache if
- * alias retrieval fails. In standalone mode: reads from memory cache,
+ * `getProductAccountAlias`. Host alias or cache failures propagate; a different
+ * cached key requires explicit migration before continuing. In standalone mode: reads from memory cache,
  * returns null if none.
  */
 export async function loadKeypair(): Promise<EncryptionKeypair | null> {
   // Try deterministic derivation first (wallet-bound, cross-device portable)
   const derived = await deriveFromAccountAlias()
   if (derived) {
-    await saveToCache(derived)
+    await saveDerivedToCache(derived)
     return derived
   }
 
-  // Fallback to cache (offline / alias unavailable)
+  // Standalone mode only: host derivation failures propagate above.
   return loadFromCache()
 }
 
@@ -262,7 +303,7 @@ export async function getOrCreateKeypair(): Promise<EncryptionKeypair> {
   // Try deterministic derivation (same wallet → same keypair on any device)
   const derived = await deriveFromAccountAlias()
   if (derived) {
-    await saveToCache(derived)
+    await saveDerivedToCache(derived)
     return derived
   }
 

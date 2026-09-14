@@ -6,7 +6,7 @@ const PRODUCT_PORT = '5199';
 /**
  * Wait for the app to be fully ready inside the test host iframe:
  * 1. Host API connection established (product-sdk <-> host-container)
- * 2. App heading rendered (React mounted + wallet auto-connected)
+ * 2. Merchant home rendered after the account-driven redirect
  */
 export async function waitForAppReady(
   testHost: TestHost,
@@ -18,9 +18,9 @@ export async function waitForAppReady(
   // Wait for product-sdk to connect to host container
   await testHost.waitForConnection(timeout);
 
-  // Wait for the T3RMINAL heading (app has mounted + host auto-connect done)
+  // The connecting heading is transient; account resolution replaces this route.
   await frame
-    .locator('[data-testid="app-heading"]')
+    .getByRole('link', { name: 'Payment', exact: true })
     .waitFor({ state: 'visible', timeout });
 
   return frame;

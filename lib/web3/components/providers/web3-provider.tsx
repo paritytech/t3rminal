@@ -5,7 +5,7 @@ import { useState, useEffect } from "react"
 import { useWeb3Store } from "@/lib/web3/store/use-web3-store"
 import { isInHost } from "@/lib/host/detect"
 import { connectToHost } from "@/lib/host/connection"
-import { getHostAccounts, subscribeHostAccounts } from "@/lib/host/accounts"
+import { subscribeHostAccounts } from "@/lib/host/accounts"
 import { WalletProviderType, WalletProviderStatus } from "@/lib/web3/types/web3"
 
 /**
@@ -15,56 +15,50 @@ import { WalletProviderType, WalletProviderStatus } from "@/lib/web3/types/web3"
  * instead of any wallet UI.
  */
 function HostAutoConnect() {
-  const { setAccount, setStatus, account } = useWeb3Store()
+  const { setAccount, setStatus } = useWeb3Store()
 
   useEffect(() => {
     if (!isInHost()) return
-    if (account?.provider === WalletProviderType.HostAPI) return
-
+    let disposed = false
     let unsubscribe = () => {}
 
+    const clearAccount = () => {
+      if (disposed) return
+      setAccount(null)
+      setStatus(WalletProviderType.HostAPI, WalletProviderStatus.Disconnected)
+    }
     const autoConnect = async () => {
-      console.log("[HostAutoConnect] Detected host environment, connecting…")
-
-      const connected = await connectToHost()
-      if (!connected) {
-        console.log("[HostAutoConnect] Failed to connect to host")
-        return
-      }
-
-      const accounts = await getHostAccounts()
-      if (accounts.length === 0) {
-        console.log("[HostAutoConnect] No accounts from host")
-        return
-      }
-
-      const first = accounts[0]
-      console.log("[HostAutoConnect] Connected:", first.name, first.address)
-
-      setAccount({
-        name: first.name,
-        address: first.address,
-        provider: WalletProviderType.HostAPI,
-      })
-      setStatus(WalletProviderType.HostAPI, WalletProviderStatus.Connected)
-
-      unsubscribe = await subscribeHostAccounts((updated) => {
-        if (updated.length > 0) {
-          const acc = updated[0]
-          setAccount({
-            name: acc.name,
-            address: acc.address,
-            provider: WalletProviderType.HostAPI,
-          })
+      try {
+        const connected = await connectToHost()
+        if (disposed) return
+        if (!connected) {
+          clearAccount()
+          return
         }
-      })
+        const stop = await subscribeHostAccounts((accounts) => {
+          if (disposed) return
+          const first = accounts[0]
+          if (!first) {
+            clearAccount()
+            return
+          }
+          setAccount({ name: first.name, address: first.address, provider: WalletProviderType.HostAPI })
+          setStatus(WalletProviderType.HostAPI, WalletProviderStatus.Connected)
+        }, () => clearAccount())
+        if (disposed) stop()
+        else unsubscribe = stop
+      } catch {
+        clearAccount()
+        if (!disposed) console.warn("[HostAutoConnect] Account connection failed")
+      }
     }
 
-    autoConnect()
-
-    return () => unsubscribe()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+    void autoConnect()
+    return () => {
+      disposed = true
+      unsubscribe()
+    }
+  }, [setAccount, setStatus])
 
   return null
 }
